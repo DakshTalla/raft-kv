@@ -2,6 +2,8 @@
 
 A linearizable key-value store replicated across 5 nodes with **Raft, implemented from scratch in Go** (no consensus library), plus a web UI that shows the cluster thinking in real time: elections, heartbeats, log replication, commits, crashes and network partitions.
 
+**Live demo: <https://raft-kv.onrender.com>** — hosted on a free tier, so the first load can take up to a minute while it wakes up. Everyone who opens it shares the same cluster.
+
 ![The cluster during a network partition: two leaders in different terms](docs/screenshots/partition.png)
 
 *A 2 | 3 network partition. N4 (term 12) is stranded on the minority side and still believes it is leader; its write (`PUT stra…`, dashed) can never commit. The majority elected N3 in term 13 and keeps committing. Healing the network makes N4 step down and discard the dashed entry.*
