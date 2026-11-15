@@ -1,0 +1,16 @@
+# runtime data written by the Raft nodes (term, vote, WAL, snapshots)
+data/
+*.exe
+/bin/
+bench-out/
+
+# frontend
+web/node_modules/
+web/.next/
+web/out/
+web/next-env.d.ts
+*.tsbuildinfo
+
+# misc
+.DS_Store
+*.log
