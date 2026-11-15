@@ -24,9 +24,22 @@ async function post(path: string, body?: unknown): Promise<void> {
   });
 }
 
+async function membership(method: string, path: string): Promise<string | null> {
+  try {
+    const res = await fetch(apiBase() + path, { method });
+    const body = await res.json().catch(() => ({}));
+    return res.ok ? null : (body.error ?? `HTTP ${res.status}`);
+  } catch (e) {
+    return String(e);
+  }
+}
+
 export const chaos = {
   kill: (id: number) => post(`/api/nodes/${id}/kill`),
   restart: (id: number) => post(`/api/nodes/${id}/restart`),
+  // Membership changes wait until the change is committed, so they report errors.
+  addNode: () => membership("POST", "/api/nodes"),
+  removeNode: (id: number) => membership("DELETE", `/api/nodes/${id}`),
   partition: (groups: number[][]) => post("/api/network/partition", { groups }),
   heal: () => post("/api/network/heal"),
   conditions: (latencyMinMs: number, latencyMaxMs: number, dropRate: number) =>

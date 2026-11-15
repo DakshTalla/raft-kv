@@ -54,6 +54,7 @@ export default function Inspector({ state, id, onClose }: { state: ClusterState;
       <Row k="commitIndex" v={n.commitIndex} hint="Highest entry known to be stored on a majority" />
       <Row k="lastApplied" v={n.lastApplied} hint="Highest entry applied to the KV store" />
       <Row k="known leader" v={n.leader ? `N${n.leader}` : "—"} />
+      <Row k="configuration" v={n.voters?.length ? n.voters.map((v) => `N${v}`).join(" ") : "none yet"} hint="The voters this node believes in (newest config entry in its log)" />
       {n.alive && n.role !== "leader" && (
         <Row
           k="election timer"

@@ -221,3 +221,36 @@ func TestMembershipChangesUnderLoad(t *testing.T) {
 		t.Fatalf("history is NOT linearizable (key %q)", key)
 	}
 }
+
+// TestClusterRestartKeepsMembership: after adding and removing nodes, closing
+// the whole cluster and starting it from the same directory brings back the
+// same set of nodes with the same data.
+func TestClusterRestartKeepsMembership(t *testing.T) {
+	dir := t.TempDir()
+	c, err := New(Options{DataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustPut(t, c, "k", "v")
+	if _, err := c.AddNode(ctxT(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RemoveNode(ctxT(5*time.Second), 2); err != nil {
+		t.Fatal(err)
+	}
+	mustPut(t, c, "k", "v2")
+	c.Close()
+
+	c, err = New(Options{DataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if ids := c.IDs(); !slices.Equal(ids, []int{1, 3, 4, 5, 6}) {
+		t.Fatalf("after restart the cluster has nodes %v, want [1 3 4 5 6]", ids)
+	}
+	mustGet(t, c, "k", "v2")
+	if v := leaderVoters(t, c); !slices.Equal(v, []int{1, 3, 4, 5, 6}) {
+		t.Fatalf("voters after restart = %v", v)
+	}
+}

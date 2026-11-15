@@ -21,6 +21,16 @@ export default function ChaosPanel({ state, selected, onSelect, drawMode, setDra
   const [latency, setLatency] = useState(net.latencyMaxMs);
   const [drop, setDrop] = useState(Math.round(net.dropRate * 100));
   const [dirty, setDirty] = useState(false);
+  const [changing, setChanging] = useState<string | null>(null); // membership change in flight
+  const [memberError, setMemberError] = useState<string | null>(null);
+
+  const change = async (label: string, run: () => Promise<string | null>) => {
+    setChanging(label);
+    setMemberError(null);
+    const err = await run();
+    setChanging(null);
+    if (err) setMemberError(err);
+  };
 
   // Follow server-side changes unless the user is mid-drag.
   useEffect(() => {
@@ -46,7 +56,17 @@ export default function ChaosPanel({ state, selected, onSelect, drawMode, setDra
 
   return (
     <div className="panel p-3">
-      <h2 className="panel-title mb-2.5">Chaos</h2>
+      <div className="mb-2.5 flex items-center justify-between">
+        <h2 className="panel-title">Nodes</h2>
+        <button
+          className="btn h-6 px-2 text-[11px]"
+          disabled={!!changing || state.nodes.length >= 9}
+          onClick={() => change("Adding a node…", chaos.addNode)}
+          title="Start a new node: it catches up as a learner, then becomes a voter"
+        >
+          + Add node
+        </button>
+      </div>
 
       <div className="flex flex-col gap-1">
         {state.nodes.map((n) => {
@@ -60,7 +80,7 @@ export default function ChaosPanel({ state, selected, onSelect, drawMode, setDra
                 <i className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: ROLE_COLOR[role], boxShadow: role === "leader" ? `0 0 10px ${ROLE_COLOR.leader}` : undefined }} />
                 <span className="font-mono text-xs">N{n.id}</span>
                 <span className="truncate text-[11px] text-muted">
-                  {role === "dead" ? "down" : role} · term {n.term}
+                  {role === "dead" ? "down" : n.membership && n.membership !== "voter" ? n.membership : role} · term {n.term}
                 </span>
               </button>
               {n.alive ? (
@@ -72,10 +92,31 @@ export default function ChaosPanel({ state, selected, onSelect, drawMode, setDra
                   Restart
                 </button>
               )}
+              <button
+                className="btn btn-danger h-6 w-6 px-0 text-[13px] leading-none"
+                disabled={!!changing || state.nodes.length <= 1}
+                onClick={() => change(`Removing N${n.id}…`, () => chaos.removeNode(n.id))}
+                title={`Remove N${n.id} from the cluster (membership change)`}
+                aria-label={`Remove node ${n.id}`}
+              >
+                −
+              </button>
             </div>
           );
         })}
       </div>
+
+      <p className="mt-1.5 text-[11px] text-muted">
+        {changing ? (
+          <span className="animate-pulse text-accent">{changing} waiting for the configuration change to commit</span>
+        ) : memberError ? (
+          <span className="text-danger">{memberError}</span>
+        ) : (
+          <>
+            {state.voters?.length ?? state.nodes.length} voters · majority = {Math.floor((state.voters?.length ?? state.nodes.length) / 2) + 1}
+          </>
+        )}
+      </p>
 
       <h3 className="panel-title mb-2 mt-4">Network partition</h3>
       <div className="grid grid-cols-2 gap-1.5">

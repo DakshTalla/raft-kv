@@ -257,7 +257,7 @@ function NodeView({
         N{node.id}
       </text>
       <text textAnchor="middle" y={role === "leader" ? 21 : 18} fontSize={9} fontWeight={600} letterSpacing="0.12em" fill={color}>
-        {role === "dead" ? "DOWN" : node.preVoting ? "PRE-VOTE" : role.toUpperCase()}
+        {role === "dead" ? "DOWN" : node.membership && node.membership !== "voter" ? node.membership.toUpperCase() : node.preVoting ? "PRE-VOTE" : role.toUpperCase()}
       </text>
 
       {/* Term badge */}

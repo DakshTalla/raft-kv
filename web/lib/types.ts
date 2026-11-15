@@ -28,6 +28,10 @@ export interface NodeState {
   heartbeatElapsed: number;
   heartbeatTicks: number;
   preVoting?: boolean;
+  voters: number[] | null;
+  learners?: number[];
+  configIndex: number;
+  membership?: "voter" | "learner" | "joining";
   votes?: Record<string, boolean>;
   nextIndex?: Record<string, number>;
   matchIndex?: Record<string, number>;
@@ -45,6 +49,7 @@ export interface ClusterState {
   network: { latencyMinMs: number; latencyMaxMs: number; dropRate: number; partitioned: boolean };
   kv: { key: string; value: string }[] | null;
   kvTotal: number;
+  voters: number[] | null; // the leader's current configuration
 }
 
 export type MsgType =

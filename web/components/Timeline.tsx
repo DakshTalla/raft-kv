@@ -16,6 +16,10 @@ const CATEGORY: Record<string, Category> = {
   snapshot: "log",
   restore: "log",
   kill: "chaos",
+  add: "chaos",
+  remove: "chaos",
+  learner: "log",
+  config: "log",
   restart: "chaos",
   partition: "chaos",
   heal: "chaos",
@@ -48,6 +52,14 @@ function describe(e: ClusterEvent): { title: string; sub?: string; color?: strin
       return { title: `${n} took a snapshot at ${e.index}`, sub: "log compacted", color: "#e879f9" };
     case "restore":
       return { title: `${n} installed a snapshot (≤ ${e.index})`, sub: "too far behind for log replay", color: "#e879f9" };
+    case "add":
+      return { title: `${n} started`, sub: "joining the cluster", color: "#a78bfa" };
+    case "learner":
+      return { title: `N${e.peer} added as a learner`, sub: "catching up before it may vote", color: "#a78bfa" };
+    case "config":
+      return { title: `New configuration committed`, sub: `voters: ${(e.detail ?? "").replace("CONFIG ", "")}`, color: "#a78bfa" };
+    case "remove":
+      return { title: `${n} removed from the cluster`, sub: "configuration change committed, node shut down", color: "#a78bfa" };
     case "kill":
       return { title: `${n} crashed`, sub: "in-memory state lost" };
     case "restart":
