@@ -37,9 +37,10 @@ func (r Role) String() string {
 // Entry is one slot of the replicated log. Data == nil means a no-op entry,
 // which a new leader appends to commit entries from earlier terms (§5.4.2).
 type Entry struct {
-	Index uint64 `json:"index"`
-	Term  uint64 `json:"term"`
-	Data  []byte `json:"data,omitempty"`
+	Index uint64    `json:"index"`
+	Term  uint64    `json:"term"`
+	Type  EntryType `json:"type,omitempty"` // EntryNormal or EntryConfig
+	Data  []byte    `json:"data,omitempty"`
 }
 
 // Snapshot is a compacted prefix of the log: the state machine state after
@@ -47,6 +48,7 @@ type Entry struct {
 type Snapshot struct {
 	LastIndex uint64 `json:"lastIndex"`
 	LastTerm  uint64 `json:"lastTerm"`
+	Voters    []int  `json:"voters,omitempty"` // cluster configuration at LastIndex
 	Data      []byte `json:"data"`
 }
 

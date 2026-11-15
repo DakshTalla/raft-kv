@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/DakshTalla/raft-kv/events"
@@ -26,6 +27,9 @@ type NodeState struct {
 	Group int        `json:"group"` // partition group (0 = no partition)
 	Log   []LogEntry `json:"log"`   // shadows Status.Log with readable commands
 	Keys  int        `json:"keys"`
+	// Membership as seen by the leader: "voter", "learner" (catching up before
+	// it may vote) or "joining" (started, not yet known to the leader).
+	Membership string `json:"membership"`
 }
 
 // NetworkState describes the current fault-injection settings.
@@ -47,6 +51,7 @@ type State struct {
 	Network NetworkState `json:"network"`
 	KV      []kv.Pair    `json:"kv"` // contents of the leader's store (first 100 keys)
 	KVTotal int          `json:"kvTotal"`
+	Voters  []int        `json:"voters"` // the leader's current configuration
 }
 
 // State builds a snapshot of the whole cluster.
@@ -64,20 +69,47 @@ func (c *Cluster) State() State {
 	lmin, lmax, drop := c.Net.Conditions()
 	s.Network.LatencyMinMs, s.Network.LatencyMaxMs, s.Network.DropRate = ms(lmin), ms(lmax), drop
 
-	for _, id := range c.ids {
+	for _, id := range c.IDs() {
 		st, alive := c.Status(id, logTail)
 		ns := NodeState{Status: st, Alive: alive, Log: make([]LogEntry, len(st.Log))}
 		if s.Network.Partitioned {
 			ns.Group = groups[id]
 		}
 		for i, e := range st.Log {
-			ns.Log[i] = LogEntry{Index: e.Index, Term: e.Term, Cmd: kv.Describe(e.Data)}
+			cmd := kv.Describe(e.Data)
+			if e.Type == raft.EntryConfig {
+				cmd = raft.DescribeConfig(e.Data)
+			}
+			ns.Log[i] = LogEntry{Index: e.Index, Term: e.Term, Cmd: cmd}
 		}
 		ns.Status.Log = nil
 		if store := c.Store(id); store != nil && alive {
 			_, ns.Keys = store.Dump(0)
 		}
 		s.Nodes = append(s.Nodes, ns)
+	}
+	// Membership labels come from the leader's view (or, without a leader,
+	// from the node that knows the newest configuration).
+	var ref *NodeState
+	for i := range s.Nodes {
+		n := &s.Nodes[i]
+		if n.ID == s.Leader || (s.Leader == 0 && n.Alive && (ref == nil || n.ConfigIndex > ref.ConfigIndex)) {
+			ref = n
+		}
+	}
+	if ref != nil {
+		s.Voters = ref.Voters
+		for i := range s.Nodes {
+			n := &s.Nodes[i]
+			switch {
+			case slices.Contains(ref.Voters, n.ID):
+				n.Membership = "voter"
+			case slices.Contains(ref.Learners, n.ID):
+				n.Membership = "learner"
+			default:
+				n.Membership = "joining"
+			}
+		}
 	}
 	// Show the KV contents of the leader, or of the most advanced live node.
 	src := s.Leader

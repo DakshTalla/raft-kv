@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/rand"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -72,6 +73,7 @@ type member struct {
 	store      *kv.Store
 	cancelTick func()
 	last       raft.Status // status captured when the node was killed
+	joined     bool        // added at runtime (not part of the initial configuration)
 }
 
 type clientSession struct{ id, seq uint64 }
@@ -85,7 +87,9 @@ type Cluster struct {
 
 	mu       sync.Mutex
 	members  map[int]*member
-	ids      []int
+	ids      []int // every running-or-crashed node, in the order they were created
+	initial  []int // the initial configuration (nodes 1..N)
+	nextID   int
 	sessions chan *clientSession
 	cancel   context.CancelFunc
 	done     chan struct{}
@@ -115,9 +119,23 @@ func New(opts Options) (*Cluster, error) {
 		c.sessions <- &clientSession{id: rng.Uint64()>>1 | 1}
 	}
 	for id := 1; id <= opts.N; id++ {
+		c.initial = append(c.initial, id)
 		c.ids = append(c.ids, id)
 		c.members[id] = &member{id: id}
 	}
+	c.nextID = opts.N
+	// Nodes added at runtime in an earlier run left a data directory behind;
+	// start them again so the cluster comes back with the same shape.
+	dirs, _ := filepath.Glob(filepath.Join(opts.DataDir, "node-*"))
+	for _, d := range dirs {
+		var id int
+		if _, err := fmt.Sscanf(filepath.Base(d), "node-%d", &id); err == nil && id > opts.N {
+			c.ids = append(c.ids, id)
+			c.members[id] = &member{id: id, joined: true}
+			c.nextID = max(c.nextID, id)
+		}
+	}
+	slices.Sort(c.ids)
 	for _, id := range c.ids {
 		if err := c.startNode(id); err != nil {
 			return nil, err
@@ -150,13 +168,19 @@ func (c *Cluster) Close() {
 
 // startNode (re)creates node id from whatever is on its disk.
 func (c *Cluster) startNode(id int) error {
-	st, err := raft.OpenStorage(filepath.Join(c.opts.DataDir, fmt.Sprintf("node-%d", id)), c.opts.Fsync)
+	c.mu.Lock()
+	joined := c.members[id].joined
+	c.mu.Unlock()
+	st, err := raft.OpenStorage(c.nodeDir(id), c.opts.Fsync)
 	if err != nil {
 		return err
 	}
 	store := kv.NewStore()
 	node, err := raft.NewNode(raft.Config{
-		ID: id, Peers: c.ids,
+		// WHY the INITIAL configuration, not the current node list: Peers is
+		// only the starting point. Every later change is in the log (or the
+		// snapshot), which the node replays from disk.
+		ID: id, Peers: c.initial, Join: joined,
 		ElectionTicks: c.opts.ElectionTicks, HeartbeatTicks: c.opts.HeartbeatTicks,
 		MaxBatch: c.opts.MaxBatch, SnapshotThreshold: c.opts.SnapshotThreshold,
 		Storage: st, StateMachine: store,
@@ -252,7 +276,11 @@ func (c *Cluster) Resume() { c.Clock.Resume(); c.publish(events.Event{Kind: "res
 // Introspection
 
 // IDs returns all node ids.
-func (c *Cluster) IDs() []int { return append([]int(nil), c.ids...) }
+func (c *Cluster) IDs() []int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]int(nil), c.ids...)
+}
 
 // Alive reports whether node id is running.
 func (c *Cluster) Alive(id int) bool {
@@ -297,7 +325,7 @@ func (c *Cluster) Store(id int) *kv.Store {
 // minority side still believes it leads, in an older term.
 func (c *Cluster) Leader() int {
 	best, bestTerm := 0, uint64(0)
-	for _, id := range c.ids {
+	for _, id := range c.IDs() {
 		if st, alive := c.Status(id, 0); alive && st.Role == "leader" && st.Term >= bestTerm {
 			best, bestTerm = id, st.Term
 		}

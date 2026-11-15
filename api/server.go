@@ -38,6 +38,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/kv/{key}", s.kv)
 	mux.HandleFunc("POST /api/nodes/{id}/kill", s.nodeAction)
 	mux.HandleFunc("POST /api/nodes/{id}/restart", s.nodeAction)
+	mux.HandleFunc("POST /api/nodes", s.addNode)
+	mux.HandleFunc("DELETE /api/nodes/{id}", s.removeNode)
 	mux.HandleFunc("POST /api/network/partition", s.partition)
 	mux.HandleFunc("POST /api/network/heal", s.heal)
 	mux.HandleFunc("POST /api/network/conditions", s.conditions)
@@ -143,6 +145,39 @@ func (s *Server) kv(w http.ResponseWriter, r *http.Request) {
 	default:
 		fail(w, http.StatusGatewayTimeout, "request was not committed in time (no reachable majority?): "+err.Error())
 	}
+}
+
+// membershipCtx allows enough real time for a change at any slow-motion speed.
+func (s *Server) membershipCtx(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), min(5*time.Second+s.c.Clock.Real(3*time.Second), 3*time.Minute))
+}
+
+// addNode handles POST /api/nodes: start a new node and add it to the cluster.
+func (s *Server) addNode(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := s.membershipCtx(r)
+	defer cancel()
+	id, err := s.c.AddNode(ctx)
+	if err != nil {
+		fail(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+}
+
+// removeNode handles DELETE /api/nodes/{id}: take a node out of the cluster.
+func (s *Server) removeNode(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		fail(w, http.StatusBadRequest, "bad node id")
+		return
+	}
+	ctx, cancel := s.membershipCtx(r)
+	defer cancel()
+	if err := s.c.RemoveNode(ctx, id); err != nil {
+		fail(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) nodeAction(w http.ResponseWriter, r *http.Request) {

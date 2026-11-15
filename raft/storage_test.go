@@ -13,8 +13,8 @@ func TestStorageRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	must(s.SaveHardState(HardState{Term: 3, VotedFor: 2}))
-	must(s.Append([]Entry{{1, 1, []byte("a")}, {2, 1, []byte("b")}, {3, 2, []byte("c")}}))
-	must(s.Append([]Entry{{4, 3, nil}}))
+	must(s.Append([]Entry{{Index: 1, Term: 1, Data: []byte("a")}, {Index: 2, Term: 1, Data: []byte("b")}, {Index: 3, Term: 2, Data: []byte("c")}}))
+	must(s.Append([]Entry{{Index: 4, Term: 3, Data: nil}}))
 	s.Close()
 
 	s, _ = OpenStorage(dir, false)
@@ -28,9 +28,9 @@ func TestStorageRoundTrip(t *testing.T) {
 
 	// Truncation (follower dropping conflicting entries) rewrites the file.
 	must(s.RewriteLog(entries[:2]))
-	must(s.Append([]Entry{{3, 4, []byte("c2")}}))
+	must(s.Append([]Entry{{Index: 3, Term: 4, Data: []byte("c2")}}))
 	// Snapshot at index 2 compacts everything up to it.
-	must(s.SaveSnapshot(Snapshot{LastIndex: 2, LastTerm: 1, Data: []byte("{}")}, []Entry{{3, 4, []byte("c2")}}))
+	must(s.SaveSnapshot(Snapshot{LastIndex: 2, LastTerm: 1, Data: []byte("{}")}, []Entry{{Index: 3, Term: 4, Data: []byte("c2")}}))
 	s.Close()
 
 	s, _ = OpenStorage(dir, false)
@@ -44,7 +44,7 @@ func TestStorageRoundTrip(t *testing.T) {
 func TestStorageIgnoresTornTailWrite(t *testing.T) {
 	dir := t.TempDir()
 	s, _ := OpenStorage(dir, false)
-	must(s.Append([]Entry{{1, 1, []byte("a")}}))
+	must(s.Append([]Entry{{Index: 1, Term: 1, Data: []byte("a")}}))
 	s.Close()
 	// Simulate a crash half-way through writing the next entry.
 	f, _ := os.OpenFile(filepath.Join(dir, "log.jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)

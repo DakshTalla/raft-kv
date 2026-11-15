@@ -3,6 +3,7 @@ package raft
 import (
 	"fmt"
 	"math/rand"
+	"slices"
 	"sync"
 	"time"
 )
@@ -10,8 +11,13 @@ import (
 // Config configures one Raft node. Time is measured in ticks: the owner calls
 // Tick() at a fixed interval (10ms of simulated time in this project).
 type Config struct {
-	ID    int
-	Peers []int // every member of the cluster, including ID
+	ID int
+	// Peers is the initial configuration: every member, including ID. It is
+	// only used until the log or a snapshot says otherwise.
+	Peers []int
+	// Join: this node is being added to a running cluster. It starts with no
+	// configuration and waits for the leader to send it one.
+	Join bool
 
 	// ElectionTicks is the minimum election timeout. The actual timeout is
 	// randomized in [ElectionTicks, 2*ElectionTicks).
@@ -37,11 +43,16 @@ type Config struct {
 
 // Node is a single Raft server. All methods are safe for concurrent use.
 type Node struct {
-	mu    sync.Mutex
-	cfg   Config
-	id    int
-	peers []int // every member except id
-	rng   *rand.Rand
+	mu  sync.Mutex
+	cfg Config
+	id  int
+	// Cluster configuration (see membership.go).
+	voters      []int        // who votes now: from the newest config entry in the log
+	baseVoters  []int        // configuration at the snapshot point (or the initial one)
+	configIndex uint64       // index of the entry that defined voters
+	configDirty bool         // config entries were appended or truncated
+	learners    map[int]bool // leader only: nodes catching up before they may vote
+	rng         *rand.Rand
 
 	// Persistent state (written to Storage before any message is sent).
 	term     uint64
@@ -109,11 +120,11 @@ func NewNode(cfg Config) (*Node, error) {
 		inflight: map[int]bool{},
 		active:   map[int]bool{},
 		preVotes: map[int]bool{},
+		learners: map[int]bool{},
 	}
-	for _, p := range cfg.Peers {
-		if p != cfg.ID {
-			n.peers = append(n.peers, p)
-		}
+	if !cfg.Join {
+		n.baseVoters = slices.Clone(cfg.Peers)
+		slices.Sort(n.baseVoters)
 	}
 	if cfg.Storage != nil {
 		hs, snap, entries, err := cfg.Storage.Load()
@@ -124,6 +135,9 @@ func NewNode(cfg Config) (*Node, error) {
 		if snap != nil {
 			n.snapshot = snap
 			n.log[0] = Entry{Index: snap.LastIndex, Term: snap.LastTerm}
+			if len(snap.Voters) > 0 {
+				n.baseVoters = snap.Voters
+			}
 			if err := cfg.StateMachine.Restore(snap.Data); err != nil {
 				return nil, err
 			}
@@ -141,6 +155,7 @@ func NewNode(cfg Config) (*Node, error) {
 		// a restart the leader's next AppendEntries tells us how far we can
 		// apply, and the KV store is rebuilt by re-applying from the snapshot.
 	}
+	n.recomputeConfig()
 	n.resetElectionTimeout()
 	return n, nil
 }
@@ -166,6 +181,9 @@ func (n *Node) Tick() {
 			n.quorumElapsed = 0
 			n.checkQuorum()
 		}
+	} else if !n.isVoter(n.id) {
+		// Not a voting member (a learner still catching up, or a node that
+		// was removed): it must never start an election.
 	} else {
 		n.electionElapsed++
 		if n.electionElapsed >= n.electionTimeout {
@@ -258,7 +276,7 @@ func (n *Node) Propose(data []byte) (index, term uint64, isLeader bool) {
 	// together with others when their reply arrives. This is what makes
 	// throughput scale with concurrency instead of one RPC per command.
 	n.broadcastAppend(false)
-	if len(n.peers) == 0 {
+	if len(n.others()) == 0 {
 		n.maybeCommit()
 	}
 	n.ready()
@@ -305,6 +323,9 @@ type Status struct {
 	Votes            map[int]bool   `json:"votes,omitempty"`
 	NextIndex        map[int]uint64 `json:"nextIndex,omitempty"`
 	MatchIndex       map[int]uint64 `json:"matchIndex,omitempty"`
+	Voters           []int          `json:"voters"`
+	ConfigIndex      uint64         `json:"configIndex"`
+	Learners         []int          `json:"learners,omitempty"`
 	Log              []Entry        `json:"log"` // the last `tail` entries
 }
 
@@ -320,8 +341,14 @@ func (n *Node) Status(tail int) Status {
 		SnapshotIndex: n.log[0].Index, SnapshotTerm: n.log[0].Term,
 		ElectionElapsed: n.electionElapsed, ElectionTimeout: n.electionTimeout,
 		HeartbeatElapsed: n.heartbeatElapsed, HeartbeatTicks: n.cfg.HeartbeatTicks,
-		PreVoting: n.preVoting,
+		PreVoting:   n.preVoting,
+		Voters:      slices.Clone(n.voters),
+		ConfigIndex: n.configIndex,
 	}
+	for id := range n.learners {
+		s.Learners = append(s.Learners, id)
+	}
+	slices.Sort(s.Learners)
 	if n.role == Candidate {
 		s.Votes = copyMap(n.votes)
 	}
@@ -357,6 +384,7 @@ func (n *Node) becomeFollower(term uint64, leader int) {
 	n.role = Follower
 	n.leader = leader
 	n.preVoting = false
+	clear(n.learners)
 	n.electionElapsed = 0
 	n.resetElectionTimeout()
 	if changed {
@@ -385,7 +413,7 @@ func (n *Node) startPreVote() {
 		n.campaign()
 		return
 	}
-	for _, p := range n.peers {
+	for _, p := range n.others() {
 		// Term is the one we would campaign in, not our current term.
 		n.send(Message{Type: MsgPreVote, To: p, Term: n.term + 1, LastLogIndex: n.lastIndex(), LastLogTerm: n.lastTerm()})
 	}
@@ -418,7 +446,7 @@ func (n *Node) handlePreVoteResp(m Message) {
 		return
 	}
 	n.preVotes[m.From] = true
-	if len(n.preVotes) >= n.quorum() {
+	if n.countVoters(n.preVotes) >= n.quorum() {
 		n.campaign() // a majority would vote for us: now run the real election
 	}
 }
@@ -434,8 +462,11 @@ func (n *Node) checkQuorum() {
 	if n.cfg.NoCheckQuorum {
 		return
 	}
-	heard := 1 // ourselves
-	for _, p := range n.peers {
+	heard := 0
+	if n.isVoter(n.id) {
+		heard = 1 // ourselves
+	}
+	for _, p := range n.others() {
 		if n.active[p] {
 			heard++
 		}
@@ -461,7 +492,7 @@ func (n *Node) campaign() {
 		n.becomeLeader()
 		return
 	}
-	for _, p := range n.peers {
+	for _, p := range n.others() {
 		n.send(Message{Type: MsgVote, To: p, LastLogIndex: n.lastIndex(), LastLogTerm: n.lastTerm()})
 	}
 }
@@ -489,13 +520,7 @@ func (n *Node) handleVoteResp(m Message) {
 		return
 	}
 	n.votes[m.From] = m.Success
-	granted := 0
-	for _, ok := range n.votes {
-		if ok {
-			granted++
-		}
-	}
-	if granted >= n.quorum() {
+	if n.countVoters(n.votes) >= n.quorum() {
 		n.becomeLeader()
 	}
 }
@@ -505,7 +530,7 @@ func (n *Node) becomeLeader() {
 	n.leader = n.id
 	n.heartbeatElapsed = 0
 	n.quorumElapsed = 0
-	for _, p := range n.peers {
+	for _, p := range n.replicas() {
 		n.next[p] = n.lastIndex() + 1
 		n.match[p] = 0
 		n.inflight[p] = false
@@ -520,7 +545,7 @@ func (n *Node) becomeLeader() {
 	n.log = append(n.log, noop)
 	n.emit(Event{Kind: "append", Index: noop.Index, Detail: "no-op"})
 	n.broadcastAppend(true)
-	if len(n.peers) == 0 {
+	if len(n.others()) == 0 {
 		n.maybeCommit()
 	}
 }
@@ -529,7 +554,7 @@ func (n *Node) becomeLeader() {
 // Log replication (§5.3)
 
 func (n *Node) broadcastAppend(heartbeat bool) {
-	for _, p := range n.peers {
+	for _, p := range n.replicas() {
 		// WHY resend on heartbeat even if a request is in flight: the in-flight
 		// message (or its reply) may have been dropped. The heartbeat doubles as
 		// the retransmission timer, so we need no per-message timeouts.
@@ -622,6 +647,11 @@ func (n *Node) handleAppend(m Message) {
 			n.truncateFrom(e.Index)
 		}
 		n.log = append(n.log, m.Entries[i:]...)
+		for _, ne := range m.Entries[i:] {
+			if ne.Type == EntryConfig {
+				n.configDirty = true // rule 1: use the new configuration right away
+			}
+		}
 		break
 	}
 
@@ -671,6 +701,7 @@ func (n *Node) advance(peer int, index uint64) {
 		n.next[peer] = n.match[peer] + 1
 	}
 	n.maybeCommit()
+	n.maybePromote(peer)
 }
 
 func (n *Node) maybeCommit() {
@@ -682,8 +713,11 @@ func (n *Node) maybeCommit() {
 			// committed indirectly once an entry of the current term commits.
 			break
 		}
-		count := 1 // ourselves
-		for _, p := range n.peers {
+		count := 0
+		if n.isVoter(n.id) {
+			count = 1 // ourselves (a leader that is removing itself does not count)
+		}
+		for _, p := range n.others() {
 			if n.match[p] >= idx {
 				count++
 			}
@@ -712,7 +746,7 @@ func (n *Node) maybeSnapshot() {
 	}
 	idx := n.lastApplied
 	t, _ := n.termAt(idx)
-	snap := &Snapshot{LastIndex: idx, LastTerm: t, Data: data}
+	snap := &Snapshot{LastIndex: idx, LastTerm: t, Voters: n.configAt(idx), Data: data}
 	first := n.log[0].Index
 	rest := append([]Entry{{Index: idx, Term: t}}, n.log[idx-first+1:]...)
 	n.log = rest
@@ -745,6 +779,10 @@ func (n *Node) handleSnapshot(m Message) {
 	}
 	n.log = append([]Entry{{Index: s.LastIndex, Term: s.LastTerm}}, rest...)
 	n.snapshot = s
+	if len(s.Voters) > 0 {
+		n.baseVoters = s.Voters
+	}
+	n.configDirty = true
 	if err := n.cfg.StateMachine.Restore(s.Data); err != nil {
 		panic(fmt.Sprintf("raft: node %d restore failed: %v", n.id, err))
 	}
@@ -780,11 +818,28 @@ func (n *Node) handleSnapshotResp(m Message) {
 // If we sent "vote granted" before writing votedFor to disk, a crash and
 // restart could make us vote twice in the same term.
 func (n *Node) ready() {
+	if n.configDirty {
+		n.recomputeConfig()
+	}
 	n.persist()
 	for n.lastApplied < n.commitIndex {
 		n.lastApplied++
 		first := n.log[0].Index
-		n.cfg.StateMachine.Apply(n.log[n.lastApplied-first])
+		e := n.log[n.lastApplied-first]
+		if e.Type == EntryConfig {
+			// Configuration entries are Raft's own business, not the KV store's.
+			if n.role == Leader {
+				n.emit(Event{Kind: "config", Index: e.Index, Detail: DescribeConfig(e.Data)})
+			}
+			continue
+		}
+		n.cfg.StateMachine.Apply(e)
+	}
+	// A leader that removed itself steps down once that change is committed:
+	// from then on the new configuration can make progress without it.
+	if n.role == Leader && !n.isVoter(n.id) && n.configIndex <= n.commitIndex {
+		n.stepDownReason = "removed from the cluster"
+		n.becomeFollower(n.term, 0)
 	}
 	n.maybeSnapshot()
 	out := n.outbox
@@ -819,6 +874,7 @@ func (n *Node) persist() {
 func (n *Node) truncateFrom(index uint64) {
 	first := n.log[0].Index
 	n.log = n.log[:index-first]
+	n.configDirty = true
 	if n.stable >= index {
 		n.needRewrite = true
 		n.stable = index - 1
@@ -843,7 +899,7 @@ func (n *Node) emit(e Event) {
 	n.cfg.OnEvent(e)
 }
 
-func (n *Node) quorum() int { return (len(n.peers)+1)/2 + 1 }
+func (n *Node) quorum() int { return len(n.voters)/2 + 1 }
 
 func (n *Node) lastIndex() uint64 { return n.log[len(n.log)-1].Index }
 func (n *Node) lastTerm() uint64  { return n.log[len(n.log)-1].Term }
