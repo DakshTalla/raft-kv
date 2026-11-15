@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -81,6 +82,7 @@ func main() {
 	fmt.Println()
 	fmt.Print(b.String())
 	if *out != "" {
+		os.MkdirAll(filepath.Dir(*out), 0o755)
 		if err := os.WriteFile(*out, []byte(b.String()), 0o644); err != nil {
 			panic(err)
 		}

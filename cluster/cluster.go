@@ -327,10 +327,10 @@ func (c *Cluster) publish(e events.Event) {
 	c.Hub.Publish(e)
 }
 
+// publishRaft forwards a node's event. Unlike RPC messages these are always
+// published (they are rare), so a browser that connects later still gets the
+// recent history: who won the last election, what was committed, etc.
 func (c *Cluster) publishRaft(e raft.Event) {
-	if !c.Hub.Active() {
-		return
-	}
 	c.publish(events.Event{
 		Kind: e.Kind, Node: e.Node, Term: e.Term, Role: e.Role,
 		Index: e.Index, Peer: e.Peer, Detail: e.Detail,

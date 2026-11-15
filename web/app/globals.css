@@ -1,0 +1,154 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+
+  /* Surfaces */
+  --color-bg: #07080c;
+  --color-panel: #0d0f15;
+  --color-raised: #141720;
+  --color-line: #1e222d;
+  --color-line-strong: #2b3040;
+
+  /* Text */
+  --color-ink: #e8eaf0;
+  --color-muted: #8b91a3;
+  --color-faint: #5a6072;
+
+  /* Roles */
+  --color-leader: #34d399;
+  --color-candidate: #fbbf24;
+  --color-follower: #60a5fa;
+  --color-dead: #4b5060;
+  --color-danger: #f87171;
+  --color-accent: #a78bfa;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+  font-feature-settings: "ss01", "cv11";
+}
+
+/* Thin, unobtrusive scrollbars for the panels. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2b3040 transparent;
+}
+
+input[type="range"] {
+  accent-color: var(--color-accent);
+}
+
+.panel {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0)) var(--color-panel);
+  border: 1px solid var(--color-line);
+  border-radius: 14px;
+}
+
+.panel-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 8px;
+  border: 1px solid var(--color-line-strong);
+  background: var(--color-raised);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-ink);
+  transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.05s;
+  white-space: nowrap;
+}
+.btn:hover:not(:disabled) {
+  background: #1b1f2b;
+  border-color: #3a4156;
+}
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.btn:focus-visible,
+.field:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+.btn-primary {
+  background: #6d4ff0;
+  border-color: #8468ff;
+  color: white;
+}
+.btn-primary:hover:not(:disabled) {
+  background: #7c60ff;
+  border-color: #9a84ff;
+}
+.btn-danger:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.5);
+  color: #fca5a5;
+}
+.btn-active {
+  background: rgba(167, 139, 250, 0.16);
+  border-color: rgba(167, 139, 250, 0.6);
+  color: #d6c9ff;
+}
+
+.field {
+  height: 30px;
+  width: 100%;
+  min-width: 0;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--color-line-strong);
+  background: #0a0c11;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 12px;
+  color: var(--color-ink);
+}
+.field::placeholder {
+  color: var(--color-faint);
+}
+
+/* Faint dot grid behind the cluster ring. */
+.dot-grid {
+  background-image: radial-gradient(rgba(255, 255, 255, 0.055) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* New timeline rows slide in. Pure CSS so a row can never get stuck hidden. */
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(10px);
+  }
+}
+.slide-in {
+  animation: slide-in 0.2s ease-out;
+}
