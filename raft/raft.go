@@ -23,6 +23,11 @@ type Config struct {
 	// accumulated in the log. 0 disables log compaction.
 	SnapshotThreshold uint64
 
+	// NoPreVote and NoCheckQuorum switch off the two liveness extensions
+	// described at startPreVote and checkQuorum. Both are on by default.
+	NoPreVote     bool
+	NoCheckQuorum bool
+
 	Storage      *Storage // nil = in-memory only (no crash recovery)
 	StateMachine StateMachine
 	Send         func(Message) // must not block; called with the node lock held
@@ -53,11 +58,16 @@ type Node struct {
 	commitIndex uint64
 	lastApplied uint64
 	votes       map[int]bool // candidate: who answered, and how
+	preVoting   bool         // follower that is asking "could I win an election?"
+	preVotes    map[int]bool
 
 	// Leader-only volatile state (§5.3).
-	next     map[int]uint64
-	match    map[int]uint64
-	inflight map[int]bool // an AppendEntries to that peer awaits its reply
+	next           map[int]uint64
+	match          map[int]uint64
+	inflight       map[int]bool // an AppendEntries to that peer awaits its reply
+	active         map[int]bool // peers heard from since the last quorum check
+	quorumElapsed  int
+	stepDownReason string // shown in the event stream when a leader steps down
 
 	electionElapsed  int
 	electionTimeout  int
@@ -97,6 +107,8 @@ func NewNode(cfg Config) (*Node, error) {
 		next:     map[int]uint64{},
 		match:    map[int]uint64{},
 		inflight: map[int]bool{},
+		active:   map[int]bool{},
+		preVotes: map[int]bool{},
 	}
 	for _, p := range cfg.Peers {
 		if p != cfg.ID {
@@ -149,10 +161,19 @@ func (n *Node) Tick() {
 			n.heartbeatElapsed = 0
 			n.broadcastAppend(true)
 		}
+		n.quorumElapsed++
+		if n.quorumElapsed >= n.cfg.ElectionTicks {
+			n.quorumElapsed = 0
+			n.checkQuorum()
+		}
 	} else {
 		n.electionElapsed++
 		if n.electionElapsed >= n.electionTimeout {
-			n.campaign()
+			if n.cfg.NoPreVote {
+				n.campaign()
+			} else {
+				n.startPreVote()
+			}
 		}
 	}
 	n.ready()
@@ -163,6 +184,19 @@ func (n *Node) Step(m Message) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.stopped {
+		return
+	}
+	// Pre-votes are handled before the term rule below on purpose: they
+	// carry a term the sender has NOT adopted yet, so they must never make
+	// us change our own term.
+	if m.Type == MsgPreVote {
+		n.handlePreVote(m)
+		n.ready()
+		return
+	}
+	if m.Type == MsgPreVoteResp {
+		n.handlePreVoteResp(m)
+		n.ready()
 		return
 	}
 	// Rule for all servers (§5.1): a higher term means we are out of date.
@@ -187,6 +221,9 @@ func (n *Node) Step(m Message) {
 		return
 	}
 
+	if n.role == Leader {
+		n.active[m.From] = true // any current-term message proves the peer can reach us
+	}
 	switch m.Type {
 	case MsgVote:
 		n.handleVote(m)
@@ -264,6 +301,7 @@ type Status struct {
 	ElectionTimeout  int            `json:"electionTimeout"`
 	HeartbeatElapsed int            `json:"heartbeatElapsed"`
 	HeartbeatTicks   int            `json:"heartbeatTicks"`
+	PreVoting        bool           `json:"preVoting,omitempty"`
 	Votes            map[int]bool   `json:"votes,omitempty"`
 	NextIndex        map[int]uint64 `json:"nextIndex,omitempty"`
 	MatchIndex       map[int]uint64 `json:"matchIndex,omitempty"`
@@ -282,6 +320,7 @@ func (n *Node) Status(tail int) Status {
 		SnapshotIndex: n.log[0].Index, SnapshotTerm: n.log[0].Term,
 		ElectionElapsed: n.electionElapsed, ElectionTimeout: n.electionTimeout,
 		HeartbeatElapsed: n.heartbeatElapsed, HeartbeatTicks: n.cfg.HeartbeatTicks,
+		PreVoting: n.preVoting,
 	}
 	if n.role == Candidate {
 		s.Votes = copyMap(n.votes)
@@ -317,14 +356,99 @@ func (n *Node) becomeFollower(term uint64, leader int) {
 	}
 	n.role = Follower
 	n.leader = leader
+	n.preVoting = false
 	n.electionElapsed = 0
 	n.resetElectionTimeout()
 	if changed {
-		n.emit(Event{Kind: "role", Role: "follower"})
+		n.emit(Event{Kind: "role", Role: "follower", Detail: n.stepDownReason})
+	}
+	n.stepDownReason = ""
+}
+
+// startPreVote runs when the election timer fires. Instead of starting an
+// election straight away, the node first asks its peers whether they WOULD
+// vote for it, without touching its own term (Raft thesis §9.6).
+//
+// WHY: a node cut off from the cluster keeps timing out. Without pre-vote it
+// would bump its term on every timeout, and when the network heals its
+// inflated term would force the perfectly healthy leader to step down. With
+// pre-vote it cannot gather a majority of "yes" while isolated, so its term
+// never moves and its return is a non-event.
+func (n *Node) startPreVote() {
+	n.preVoting = true
+	n.leader = 0
+	n.preVotes = map[int]bool{n.id: true}
+	n.electionElapsed = 0
+	n.resetElectionTimeout()
+	n.emit(Event{Kind: "prevote"})
+	if n.quorum() == 1 {
+		n.campaign()
+		return
+	}
+	for _, p := range n.peers {
+		// Term is the one we would campaign in, not our current term.
+		n.send(Message{Type: MsgPreVote, To: p, Term: n.term + 1, LastLogIndex: n.lastIndex(), LastLogTerm: n.lastTerm()})
+	}
+}
+
+func (n *Node) handlePreVote(m Message) {
+	upToDate := m.LastLogTerm > n.lastTerm() ||
+		(m.LastLogTerm == n.lastTerm() && m.LastLogIndex >= n.lastIndex())
+	// "Do I still have a leader?" If we heard a heartbeat recently, the
+	// cluster is fine from where we stand and an election would only disrupt
+	// it. Two missed heartbeats count as "the leader is gone".
+	quiet := n.cfg.ElectionTicks - n.cfg.HeartbeatTicks
+	leaderAlive := n.role == Leader || (n.leader != 0 && n.electionElapsed < quiet)
+	grant := m.Term > n.term && upToDate && !leaderAlive
+	// Nothing is recorded: a pre-vote is not a promise, so it needs no disk
+	// write and does not reset our election timer.
+	resp := Message{Type: MsgPreVoteResp, To: m.From, Success: grant, Term: n.term}
+	if grant {
+		resp.Term = m.Term // echo, so the asker can match it to this round
+	}
+	n.send(resp)
+}
+
+func (n *Node) handlePreVoteResp(m Message) {
+	if !m.Success && m.Term > n.term {
+		n.becomeFollower(m.Term, 0) // we are behind; catch up on the term
+		return
+	}
+	if !n.preVoting || !m.Success || m.Term != n.term+1 {
+		return
+	}
+	n.preVotes[m.From] = true
+	if len(n.preVotes) >= n.quorum() {
+		n.campaign() // a majority would vote for us: now run the real election
+	}
+}
+
+// checkQuorum makes a leader step down if it has not heard from a majority
+// for a whole election timeout.
+//
+// WHY: a leader that is partitioned away from the majority would otherwise
+// keep believing it leads forever. It can never commit anything, so safety is
+// not at stake, but its clients would hang until they time out. Stepping down
+// lets them fail fast and find the real leader.
+func (n *Node) checkQuorum() {
+	if n.cfg.NoCheckQuorum {
+		return
+	}
+	heard := 1 // ourselves
+	for _, p := range n.peers {
+		if n.active[p] {
+			heard++
+		}
+		n.active[p] = false
+	}
+	if heard < n.quorum() {
+		n.stepDownReason = "lost contact with a majority"
+		n.becomeFollower(n.term, 0)
 	}
 }
 
 func (n *Node) campaign() {
+	n.preVoting = false
 	n.role = Candidate
 	n.term++
 	n.votedFor = n.id
@@ -380,10 +504,12 @@ func (n *Node) becomeLeader() {
 	n.role = Leader
 	n.leader = n.id
 	n.heartbeatElapsed = 0
+	n.quorumElapsed = 0
 	for _, p := range n.peers {
 		n.next[p] = n.lastIndex() + 1
 		n.match[p] = 0
 		n.inflight[p] = false
+		n.active[p] = true // the election itself proved we can reach a majority
 	}
 	n.emit(Event{Kind: "role", Role: "leader"})
 	// WHY a no-op entry: a leader may only commit entries from its own term by
@@ -450,6 +576,7 @@ func (n *Node) handleAppend(m Message) {
 		n.becomeFollower(n.term, m.From) // someone else won this term
 	}
 	n.leader = m.From
+	n.preVoting = false
 	n.electionElapsed = 0
 
 	resp := Message{Type: MsgAppResp, To: m.From}
@@ -602,6 +729,7 @@ func (n *Node) handleSnapshot(m Message) {
 		n.becomeFollower(n.term, m.From)
 	}
 	n.leader = m.From
+	n.preVoting = false
 	n.electionElapsed = 0
 	s := m.Snapshot
 	resp := Message{Type: MsgSnapResp, To: m.From, Success: true, MatchIndex: s.LastIndex}
@@ -700,7 +828,9 @@ func (n *Node) truncateFrom(index uint64) {
 
 func (n *Node) send(m Message) {
 	m.From = n.id
-	m.Term = n.term
+	if m.Term == 0 {
+		m.Term = n.term // pre-vote messages set their own term
+	}
 	n.outbox = append(n.outbox, m)
 }
 

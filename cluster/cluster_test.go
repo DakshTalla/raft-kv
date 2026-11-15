@@ -143,7 +143,10 @@ func waitConverged(t *testing.T, c *Cluster, timeout time.Duration) {
 // replicas hold identical data.
 func assertLogsConsistent(t *testing.T, c *Cluster) {
 	t.Helper()
-	type entryKey struct{ term uint64; data string }
+	type entryKey struct {
+		term uint64
+		data string
+	}
 	ref := map[uint64]entryKey{}
 	owner := map[uint64]int{}
 	var refDump []kv.Pair
@@ -510,4 +513,67 @@ func TestChaosLinearizability(t *testing.T) {
 	if ok, key := checker.Check(history); !ok {
 		t.Fatalf("history is NOT linearizable (key %q)", key)
 	}
+}
+
+// TestPreVotePreventsDisruption: a follower that is cut off keeps timing out.
+// Thanks to pre-vote it must not inflate its term, so when it comes back the
+// healthy leader keeps leading in the same term.
+func TestPreVotePreventsDisruption(t *testing.T) {
+	c, obs := newTestCluster(t, Options{})
+	mustPut(t, c, "k", "v")
+	leader := c.Leader()
+	before, _ := c.Status(leader, 0)
+	lonely := leader%5 + 1
+	var rest []int
+	for _, id := range c.IDs() {
+		if id != lonely {
+			rest = append(rest, id)
+		}
+	}
+	c.Partition([][]int{{lonely}, rest})
+	time.Sleep(1500 * time.Millisecond) // five or more election timeouts
+	if st, _ := c.Status(lonely, 0); st.Term != before.Term || st.Role == "candidate" {
+		t.Fatalf("isolated node moved to term %d as %s (cluster is in term %d)", st.Term, st.Role, before.Term)
+	}
+	if obs.count("prevote", lonely) == 0 {
+		t.Fatal("isolated node never tried a pre-vote")
+	}
+	c.Heal()
+	mustPut(t, c, "k", "v2")
+	waitConverged(t, c, 3*time.Second)
+	after, _ := c.Status(c.Leader(), 0)
+	if c.Leader() != leader || after.Term != before.Term {
+		t.Fatalf("rejoining node disrupted the cluster: leader %d term %d -> leader %d term %d", leader, before.Term, c.Leader(), after.Term)
+	}
+}
+
+// TestCheckQuorumLeaderStepsDown: a leader that can no longer reach a
+// majority gives up leadership instead of leaving its clients hanging.
+func TestCheckQuorumLeaderStepsDown(t *testing.T) {
+	c, _ := newTestCluster(t, Options{})
+	mustPut(t, c, "k", "v")
+	old := c.Leader()
+	var rest []int
+	for _, id := range c.IDs() {
+		if id != old {
+			rest = append(rest, id)
+		}
+	}
+	c.Partition([][]int{{old}, rest})
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if st, _ := c.Status(old, 0); st.Role != "leader" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("isolated leader never stepped down")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// A client talking to it now gets an immediate "not the leader".
+	_, err := c.Do(ctxT(time.Second), old, Request{Op: kv.OpPut, Key: "k", Value: "x"})
+	if _, ok := err.(*NotLeaderError); !ok {
+		t.Fatalf("want NotLeaderError from the deposed leader, got %v", err)
+	}
+	mustPut(t, c, "k", "v2") // the majority side carries on
 }

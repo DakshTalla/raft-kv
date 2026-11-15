@@ -54,12 +54,14 @@ type Snapshot struct {
 type MsgType int
 
 const (
-	MsgVote     MsgType = iota // RequestVote request
-	MsgVoteResp                // RequestVote response
-	MsgApp                     // AppendEntries request (also the heartbeat)
-	MsgAppResp                 // AppendEntries response
-	MsgSnap                    // InstallSnapshot request
-	MsgSnapResp                // InstallSnapshot response
+	MsgVote        MsgType = iota // RequestVote request
+	MsgVoteResp                   // RequestVote response
+	MsgApp                        // AppendEntries request (also the heartbeat)
+	MsgAppResp                    // AppendEntries response
+	MsgSnap                       // InstallSnapshot request
+	MsgSnapResp                   // InstallSnapshot response
+	MsgPreVote                    // "would you vote for me?" — asked before a real election
+	MsgPreVoteResp                // answer to MsgPreVote
 )
 
 func (t MsgType) String() string {
@@ -76,13 +78,17 @@ func (t MsgType) String() string {
 		return "InstallSnapshot"
 	case MsgSnapResp:
 		return "InstallSnapshotResp"
+	case MsgPreVote:
+		return "PreVote"
+	case MsgPreVoteResp:
+		return "PreVoteResp"
 	}
 	return fmt.Sprintf("msg(%d)", int(t))
 }
 
 // IsResponse reports whether t is a reply to another message.
 func (t MsgType) IsResponse() bool {
-	return t == MsgVoteResp || t == MsgAppResp || t == MsgSnapResp
+	return t == MsgVoteResp || t == MsgAppResp || t == MsgSnapResp || t == MsgPreVoteResp
 }
 
 // Message is a single RPC request or response. One struct covers all six
@@ -131,7 +137,7 @@ type StateMachine interface {
 // Event is an observable thing that happened inside a node. The cluster turns
 // these into the WebSocket stream that drives the visualizer.
 type Event struct {
-	Kind   string // "role", "vote", "append", "commit", "snapshot", "restore", "truncate"
+	Kind   string // "role", "prevote", "vote", "append", "commit", "snapshot", "restore", "truncate"
 	Node   int
 	Term   uint64
 	Role   string

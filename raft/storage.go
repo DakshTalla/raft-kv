@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // HardState is the part of Raft state that must survive a crash (Figure 2,
@@ -160,7 +161,7 @@ func (s *Storage) RewriteLog(entries []Entry) error {
 		f.Sync()
 	}
 	f.Close()
-	if err := os.Rename(tmp, s.path("log.jsonl")); err != nil {
+	if err := renameRetry(tmp, s.path("log.jsonl")); err != nil {
 		return err
 	}
 	return s.openLogForAppend()
@@ -218,7 +219,25 @@ func (s *Storage) writeAtomic(name string, v any) error {
 	f.Close()
 	// WHY rename: on both POSIX and Windows (MoveFileEx) the rename replaces
 	// the old file in one step, so readers see either the old or new version.
-	return os.Rename(tmp, s.path(name))
+	return renameRetry(tmp, s.path(name))
+}
+
+// renameRetry is os.Rename with a few retries.
+//
+// WHY: on Windows a rename fails with "Access is denied" while any other
+// process (antivirus, the search indexer) has the destination file open, which
+// happens for a few milliseconds now and then. Since a storage error makes
+// the node crash on purpose, a transient lock must not count as one. The Go
+// toolchain does the same internally (cmd/internal/robustio).
+func renameRetry(from, to string) error {
+	var err error
+	for attempt := 0; attempt < 10; attempt++ {
+		if err = os.Rename(from, to); err == nil {
+			return nil
+		}
+		time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+	}
+	return err
 }
 
 func readJSON(path string, v any) error {

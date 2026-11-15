@@ -16,8 +16,8 @@ import (
 
 // Op is one client operation as observed from outside the system.
 type Op struct {
-	Call   int64 // time the client sent the request (ns)
-	Return int64 // time the client got the response (ns)
+	Call   int64  // time the client sent the request (ns)
+	Return int64  // time the client got the response (ns)
 	Kind   string // "put", "get" or "delete"
 	Key    string
 	In     string // value written (put)
