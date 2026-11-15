@@ -6,7 +6,6 @@ package cluster
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -114,26 +113,33 @@ func New(opts Options) (*Cluster, error) {
 	// WHY random session ids: the duplicate-detection table is part of the
 	// replicated state and survives restarts of this process. Reusing ids
 	// 1..N after a restart would make new requests look like old duplicates.
-	rng := rand.New(rand.NewSource(opts.Seed ^ time.Now().UnixNano()))
 	for i := 0; i < opts.Sessions; i++ {
-		c.sessions <- &clientSession{id: rng.Uint64()>>1 | 1}
+		c.sessions <- &clientSession{id: kv.NewSessionID()}
 	}
 	for id := 1; id <= opts.N; id++ {
 		c.initial = append(c.initial, id)
-		c.ids = append(c.ids, id)
-		c.members[id] = &member{id: id}
 	}
 	c.nextID = opts.N
-	// Nodes added at runtime in an earlier run left a data directory behind;
-	// start them again so the cluster comes back with the same shape.
+	// WHY look at the disk: after membership changes, the set of nodes is no
+	// longer 1..N. If an earlier run left data behind, restart exactly the
+	// nodes that have a data directory (added ones included, removed ones —
+	// whose directory was deleted — not). Only an empty DataDir means a
+	// brand-new cluster of nodes 1..N.
+	var onDisk []int
 	dirs, _ := filepath.Glob(filepath.Join(opts.DataDir, "node-*"))
 	for _, d := range dirs {
 		var id int
-		if _, err := fmt.Sscanf(filepath.Base(d), "node-%d", &id); err == nil && id > opts.N {
-			c.ids = append(c.ids, id)
-			c.members[id] = &member{id: id, joined: true}
-			c.nextID = max(c.nextID, id)
+		if _, err := fmt.Sscanf(filepath.Base(d), "node-%d", &id); err == nil && id > 0 {
+			onDisk = append(onDisk, id)
 		}
+	}
+	if len(onDisk) == 0 {
+		onDisk = c.initial
+	}
+	for _, id := range onDisk {
+		c.ids = append(c.ids, id)
+		c.members[id] = &member{id: id, joined: id > opts.N}
+		c.nextID = max(c.nextID, id)
 	}
 	slices.Sort(c.ids)
 	for _, id := range c.ids {

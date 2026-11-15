@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand"
 	"time"
 
 	"github.com/DakshTalla/raft-kv/kv"
@@ -91,9 +90,8 @@ func Start(cfg Config) (*Server, error) {
 		stop: make(chan struct{}), done: make(chan struct{}),
 		sessions: make(chan *session, 256),
 	}
-	rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(cfg.ID)))
 	for i := 0; i < cap(s.sessions); i++ {
-		s.sessions <- &session{id: rng.Uint64()>>1 | 1}
+		s.sessions <- &session{id: kv.NewSessionID()}
 	}
 	tr.Start(node.Step)
 	go s.tickLoop()
