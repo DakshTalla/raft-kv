@@ -36,6 +36,17 @@ Things to try in the UI:
 4. **Burst** → 20 concurrent writes get batched into a few `AppendEntries` messages.
 5. Kill a follower, **Burst** three times, restart it → it is so far behind that it receives a snapshot.
 
+### Real multi-process cluster (TCP)
+
+```powershell
+./start-cluster.ps1                                           # 5 processes, Raft on ports 9001-9005
+curl.exe -L -X PUT -d hello http://127.0.0.1:8001/kv/greeting # -L follows the 307 to the leader
+curl.exe -L http://127.0.0.1:8003/kv/greeting
+./start-cluster.ps1 -Stop
+```
+
+Each node opens in its own window; close the leader's window to crash it and watch the others elect a new one.
+
 Manual start / other platforms:
 
 ```bash
@@ -132,11 +143,11 @@ From [docs/BENCHMARK.md](docs/BENCHMARK.md) — 5 nodes, real-time clock, 1–3 
 
 | Concurrent clients | Throughput | p50 | p99 |
 |---:|---:|---:|---:|
-| 1 | 207 ops/s | 4.8 ms | 6.4 ms |
-| 32 | 5,259 ops/s | 5.9 ms | 16.2 ms |
-| 128 | 14,838 ops/s | 6.5 ms | 38.2 ms |
+| 1 | 206 ops/s | 4.9 ms | 6.4 ms |
+| 32 | 5,262 ops/s | 5.9 ms | 15.2 ms |
+| 128 | 16,539 ops/s | 6.3 ms | 30.9 ms |
 
-Leader failover over 15 trials: new leader elected in **170 ms median (261 ms worst)**; first successful client write **178 ms** after the crash.
+Leader failover over 15 trials: new leader elected in **170 ms median (239 ms worst)**; first successful client write **180 ms** after the crash.
 
 Throughput grows ~70× from 1 to 128 clients while median latency stays flat, because the leader batches every command that arrives during a round trip into a single `AppendEntries`.
 

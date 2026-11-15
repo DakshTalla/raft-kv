@@ -12,9 +12,9 @@ Contents: [1. Pitch](#1-the-60-second-pitch) · [2. Raft concepts](#2-raft-in-pl
 >
 > To prove it works I built two things. First, a chaos test that kills nodes, partitions the network and drops packets while clients run, and then checks the history with a linearizability checker I wrote. Second, a web visualizer where you can watch every RPC, kill the leader, or draw a line through the cluster to partition it and see the system recover.
 >
-> It does about 15,000 linearizable writes per second with 128 clients and recovers from a leader crash in about 180 milliseconds."
+> It does about 16,500 linearizable writes per second with 128 clients and recovers from a leader crash in about 170 milliseconds. The same Raft code also runs as five separate processes talking over TCP."
 
-Be upfront about the main limitation before they find it: **the five nodes run in one process over a simulated network**, not on five machines. The reason is deliberate (fault injection and visualisation), and the Raft code only depends on a `Send(message)` function, so a TCP transport could replace the simulator.
+Know which mode you are showing. **The visualizer runs the five nodes in one process over a simulated network** — deliberately, so faults can be injected with one click and time can be slowed down 60×. **`./start-cluster.ps1` runs five separate OS processes that talk Raft over real TCP** (`transport/`, `server/`, `cmd/raftnode`). The Raft package is identical in both: it only calls a `Send(message)` function and receives `Step` calls. What is still not covered is running on separate *machines* (no TLS, no service discovery).
 
 ---
 
@@ -139,6 +139,16 @@ Run `./start.ps1`. The default speed is 20× slow motion. The ring around each n
 
 **`kv/store_test.go`** — duplicate suppression, snapshot round trip, waiter notification.
 
+### `transport/`, `server/`, `cmd/raftnode` — the real multi-process mode
+
+**`transport/tcp.go`** — The real-network counterpart of `sim/network.go`. One listener per node; one long-lived outgoing TCP connection per peer, owned by a `writeLoop` goroutine that dials on demand and reconnects after errors. Messages are encoded with `encoding/gob`. `Send` never blocks: each peer has a bounded queue and a full queue drops the message (Raft retransmits on the next heartbeat). TCP keeps one sender's messages in order, the same per-link FIFO the simulator imitates.
+
+**`server/server.go`** — One node as a standalone process: storage + KV store + Raft node + TCP transport + a wall-clock ticker (10 ms per tick). `Do` proposes a command on this node only and returns `NotLeaderError` with a leader hint otherwise. A small pool of client sessions gives exactly-once semantics to requests that do not bring their own id.
+
+**`server/server_test.go`** — Five nodes on real localhost sockets: replicate 100 writes, stop the leader, stop a second node, bring the first back so it has to catch up via a snapshot over the wire, check all replicas converge.
+
+**`cmd/raftnode/main.go`** — The binary for one node: flags for its id and every node's Raft and API addresses; serves `/kv/{key}` (307 to the leader's address when it is a follower) and `/status`. `start-cluster.ps1` launches five of them in separate windows.
+
 ### `cluster/` — gluing it together
 
 **`cluster/cluster.go`** — Creates the clock, the network, and N × (storage + store + node). `startNode` builds a node from whatever is on disk (so it is both "first start" and "restart after crash"). Chaos controls: `Kill`, `Restart`, `Partition`, `Heal`, `SetNetwork`, `SetScale`, `Pause`. Converts node and network events into the public event stream.
@@ -245,13 +255,15 @@ A cluster of 2f+1 nodes tolerates f crash failures: 5 nodes → 2. It does not t
 6 nodes need a majority of 4 and still only tolerate 2 failures — an extra node adds cost and no fault tolerance.
 
 **Q23. What is missing compared with etcd or Consul?**
-Real network transport, membership changes (joint consensus), PreVote and CheckQuorum, ReadIndex/leases, chunked snapshots, fsync batching, session expiry. I list these under "Limits" in the README.
+Membership changes (joint consensus), ReadIndex/leases, chunked snapshots, fsync batching, session expiry, TLS between nodes. I list these under "Limits" in the README. PreVote, CheckQuorum and a real TCP transport *are* implemented.
 
 **Q24. What are PreVote and CheckQuorum?**
-*PreVote*: before incrementing its term, a would-be candidate asks whether it could win. A node that was partitioned away (and kept timing out) would otherwise come back with a huge term and force the healthy leader to step down. *CheckQuorum*: a leader that has not heard from a majority for an election timeout steps down by itself instead of continuing to believe it leads. You can see both missing behaviours in the UI.
+*PreVote*: before incrementing its term, a would-be candidate asks whether it could win. A node that was partitioned away (and kept timing out) would otherwise come back with a huge term and force the healthy leader to step down. *CheckQuorum*: a leader that has not heard from a majority for an election timeout steps down by itself instead of continuing to believe it leads, so its clients fail fast and look for the real leader.
 
-**Q25. Why a simulated network instead of real sockets?**
-Because the goal was to study and demonstrate failure behaviour. A simulator lets me inject an exact fault with one call, slow time down 60× so a person can follow individual messages, pause, and write repeatable tests. The Raft package has no dependency on the simulator — it calls a `Send` function and receives `Step` calls — so replacing it with TCP or gRPC touches only the wiring in `cluster/`.
+Both are implemented (`startPreVote`, `handlePreVote`, `checkQuorum` in `raft/raft.go`) and you can watch them: press *Split 2 | 3*. The old leader turns into a follower after about 300 ms ("lost contact with a majority"), and the two cut-off nodes show **PRE-VOTE** and stay in their old term no matter how long you wait. Heal the network and the majority's leader keeps its job in the same term. Two details worth mentioning: a pre-vote is not a promise, so nothing is written to disk and the voter's timer is not reset; and a node refuses a pre-vote while it has heard from a leader recently, which is what stops a returning node from disrupting a healthy cluster. Tests: `TestPreVotePreventsDisruption`, `TestCheckQuorumLeaderStepsDown`.
+
+**Q25. Is it really distributed, or just a simulation?**
+Both modes exist. The visualizer uses a simulated network because the goal there is to study and demonstrate failure behaviour: inject an exact fault with one call, slow time down 60×, pause, and write repeatable tests. `./start-cluster.ps1` runs five separate processes over real TCP sockets, and `server/server_test.go` tests that mode (crash the leader, catch up via snapshot over the wire). The Raft package is the same in both — it calls a `Send` function and receives `Step` calls — which is the point of the message-passing design. Swapping gob-over-TCP for gRPC would only touch `transport/`.
 
 **Q26. What was the hardest bug / most subtle part?**
 Good honest candidates: (1) ordering — making sure nothing is sent before it is persisted (solved structurally with `ready()`); (2) the duplicate-detection table had to be inside the snapshot, and client session ids had to be random, because the table survives restarts and reused ids would make new requests look like old duplicates; (3) snapshot edge cases around the sentinel entry (`prevLogIndex` falling inside a follower's snapshot).
@@ -270,11 +282,11 @@ RPC events bypass React state: they are stored in a mutable map and drawn inside
 |---|---|
 | Cluster | 5 nodes, tolerates 2 failures, majority = 3 |
 | Election timeout / heartbeat | 150–300 ms random / 50 ms |
-| Throughput | ~14,800 linearizable writes/s (128 clients), ~5,300 (32 clients), ~200 (1 client) |
-| Latency | p50 6.5 ms, p99 38 ms at 128 clients (1–3 ms simulated one-way network latency) |
-| Failover | 170 ms median, 261 ms worst of 15 trials to elect; 178 ms median to first committed write |
-| Tests | 8 cluster scenarios + chaos run of ~200 operations checked for linearizability |
-| Size | ~3,100 lines of Go (heavily commented), ~1,600 lines of TypeScript, ~700 lines of tests |
+| Throughput | ~16,500 linearizable writes/s (128 clients), ~5,300 (32 clients), ~200 (1 client) |
+| Latency | p50 6.3 ms, p99 31 ms at 128 clients (1–3 ms simulated one-way network latency) |
+| Failover | 170 ms median, 239 ms worst of 15 trials to elect; 180 ms median to first committed write |
+| Tests | 10 simulated-cluster scenarios (incl. PreVote, CheckQuorum) + chaos run of ~200 operations checked for linearizability + a 5-node cluster over real TCP; race detector in CI |
+| Size | ~3,700 lines of Go (heavily commented), ~1,600 lines of TypeScript, ~900 lines of tests |
 
 Re-measure on your own machine before quoting: `go run ./cmd/bench -out docs/BENCHMARK.md`.
 
@@ -282,9 +294,9 @@ Re-measure on your own machine before quoting: `go run ./cmd/bench -out docs/BEN
 
 ## 7. Resume bullets
 
-- Built a fault-tolerant distributed key-value store in **Go**, implementing the **Raft consensus algorithm from scratch** (leader election, log replication, write-ahead log persistence, snapshot-based log compaction); a 5-node cluster sustains **~14,800 linearizable writes/s at 6.5 ms median latency** (128 concurrent clients) through request batching.
-- Achieved automatic leader **failover in ~170 ms (median of 15 trials)** with zero lost acknowledged writes; verified correctness with a chaos test suite that injects node crashes, network partitions and 5% packet loss, and validates client histories with a self-written **linearizability checker**.
+- Built a fault-tolerant distributed key-value store in **Go**, implementing the **Raft consensus algorithm from scratch** (leader election, log replication, write-ahead log persistence, snapshot-based log compaction); a 5-node cluster sustains **~16,500 linearizable writes/s at 6.3 ms median latency** (128 concurrent clients) through request batching; runs as 5 processes over TCP or in a fault-injecting simulator.
+- Achieved automatic leader **failover in ~170 ms (median of 15 trials)** with zero lost acknowledged writes, plus PreVote and CheckQuorum so partitions cannot disrupt a healthy leader; verified correctness with a chaos test suite that injects node crashes, network partitions and 5% packet loss, and validates client histories with a self-written **linearizability checker**.
 - Designed a real-time cluster visualizer in **Next.js, TypeScript and WebSockets** that animates every RPC, election timer and per-node log at 60 fps, with interactive fault injection (kill/restart nodes, draw network partitions, latency, packet loss, 60× slow motion).
 
 Shorter one-liner for a projects section:
-*Raft KV — distributed key-value store on a from-scratch Raft implementation in Go; ~15k linearizable writes/s, ~170 ms failover, chaos-tested with a linearizability checker; live Next.js visualizer.*
+*Raft KV — distributed key-value store on a from-scratch Raft implementation in Go; ~16.5k linearizable writes/s, ~170 ms failover, chaos-tested with a linearizability checker; live Next.js visualizer.*
