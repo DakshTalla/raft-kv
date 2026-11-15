@@ -88,6 +88,8 @@ Run `./start.ps1`. The default speed is 20× slow motion. The ring around each n
 | 8 | Kill a follower, press **Burst** 3×, restart it | Log cells show `snap`. The restarted node gets a pink square (`InstallSnapshot`); timeline: "installed a snapshot". |
 | 9 | Restart any node | Click it: its term and log came back from disk; `commitIndex` starts low and catches up from the leader. |
 | 10 | Packet loss 30% | Red crosses on dropped messages; the next heartbeat retransmits. Still correct, just slower. |
+| 12 | **+ Add node** | The new node shows LEARNER: the leader replicates its log (or a snapshot) to it, but it cannot vote yet. Once caught up it becomes a voter (timeline: "New configuration committed") and the panel's majority changes, e.g. 3 of 5 → 4 of 6. |
+| 13 | Remove the leader with **−** | The leader keeps leading until the change commits — counting votes without itself — then steps down. The others elect a new leader. |
 | 11 | Latency 200 ms | Round trips approach the election timeout → spurious elections and rising terms. Good moment to explain why `election timeout ≫ network round trip`. |
 
 ---
@@ -102,6 +104,8 @@ Run `./start.ps1`. The default speed is 20× slow motion. The ring around each n
 - `Message`: one struct for all six message kinds (`RequestVote`, `AppendEntries`, `InstallSnapshot` and their responses). Requests and responses are separate messages; nothing blocks.
 - `StateMachine` interface: `Apply`, `Snapshot`, `Restore`. Raft does not know it is replicating a KV store.
 - `Event`: what the node reports to observers (role change, commit, …).
+
+**`raft/membership.go`** — Adding and removing nodes one at a time. The configuration (who votes) is a special log entry, `EntryConfig`. Rules: a node always uses the newest configuration in its log, even before it commits; only one change at a time; each change adds or removes exactly one voter. `AddMember` first makes the node a *learner* (it gets the log but does not vote or count); `maybePromote` appends the config entry that makes it a voter once it has caught up to the commit index. `RemoveMember` appends the config without the node; a leader that removes itself steps down in `ready()` once that entry commits. `checkCanChange` also requires the leader to have committed an entry of its own term first (the known fix to the original single-server algorithm). Snapshots store the configuration at their index (`Snapshot.Voters`).
 
 **`raft/raft.go`** — The node. Read it in this order:
 1. `Node` struct: persistent state (`term`, `votedFor`, `log`), volatile state (`role`, `commitIndex`, `lastApplied`), leader state (`next`, `match`, `inflight`), timers. `log[0]` is a **sentinel** holding the index/term of the last snapshotted entry so "previous entry" lookups never need a special case.
@@ -255,18 +259,21 @@ A cluster of 2f+1 nodes tolerates f crash failures: 5 nodes → 2. It does not t
 6 nodes need a majority of 4 and still only tolerate 2 failures — an extra node adds cost and no fault tolerance.
 
 **Q23. What is missing compared with etcd or Consul?**
-Membership changes (joint consensus), ReadIndex/leases, chunked snapshots, fsync batching, session expiry, TLS between nodes. I list these under "Limits" in the README. PreVote, CheckQuorum and a real TCP transport *are* implemented.
+Joint consensus (I do single-server membership changes instead), ReadIndex/leases, chunked snapshots, fsync batching, session expiry, TLS between nodes. I list these under "Limits" in the README. PreVote, CheckQuorum and a real TCP transport *are* implemented.
 
 **Q24. What are PreVote and CheckQuorum?**
 *PreVote*: before incrementing its term, a would-be candidate asks whether it could win. A node that was partitioned away (and kept timing out) would otherwise come back with a huge term and force the healthy leader to step down. *CheckQuorum*: a leader that has not heard from a majority for an election timeout steps down by itself instead of continuing to believe it leads, so its clients fail fast and look for the real leader.
 
 Both are implemented (`startPreVote`, `handlePreVote`, `checkQuorum` in `raft/raft.go`) and you can watch them: press *Split 2 | 3*. The old leader turns into a follower after about 300 ms ("lost contact with a majority"), and the two cut-off nodes show **PRE-VOTE** and stay in their old term no matter how long you wait. Heal the network and the majority's leader keeps its job in the same term. Two details worth mentioning: a pre-vote is not a promise, so nothing is written to disk and the voter's timer is not reset; and a node refuses a pre-vote while it has heard from a leader recently, which is what stops a returning node from disrupting a healthy cluster. Tests: `TestPreVotePreventsDisruption`, `TestCheckQuorumLeaderStepsDown`.
 
+**Q24b. How do you add or remove a node without breaking safety?**
+One server at a time. The configuration is a log entry, and a node uses the newest one in its log right away. When you add or remove a single node, every majority of the old configuration overlaps every majority of the new one (3 of {1..5} and 4 of {1..6} must share a node), so two leaders can never be elected in the same term by disjoint majorities. Switching several nodes at once (say {1,2,3} → {1,4,5}) breaks that overlap, which is why that needs *joint consensus*. Two practical details: a new node first catches up as a non-voting **learner** — otherwise a 3-node cluster becomes a 4-node cluster that needs 3 acks while one node has an empty log, and one more failure stalls writes; and a leader that removes itself keeps replicating until the change commits (it does not count its own ack), then steps down. Tests: `TestAddNode`, `TestRemoveLeader`, `TestOneChangeAtATime`, and `TestMembershipChangesUnderLoad`, which grows the cluster to 7 and shrinks it to 3 (always removing the leader) while clients run, then checks linearizability.
+
 **Q25. Is it really distributed, or just a simulation?**
 Both modes exist. The visualizer uses a simulated network because the goal there is to study and demonstrate failure behaviour: inject an exact fault with one call, slow time down 60×, pause, and write repeatable tests. `./start-cluster.ps1` runs five separate processes over real TCP sockets, and `server/server_test.go` tests that mode (crash the leader, catch up via snapshot over the wire). The Raft package is the same in both — it calls a `Send` function and receives `Step` calls — which is the point of the message-passing design. Swapping gob-over-TCP for gRPC would only touch `transport/`.
 
 **Q26. What was the hardest bug / most subtle part?**
-Good honest candidates: (1) ordering — making sure nothing is sent before it is persisted (solved structurally with `ready()`); (2) the duplicate-detection table had to be inside the snapshot, and client session ids had to be random, because the table survives restarts and reused ids would make new requests look like old duplicates; (3) snapshot edge cases around the sentinel entry (`prevLogIndex` falling inside a follower's snapshot).
+Good honest candidates: (1) ordering — making sure nothing is sent before it is persisted (solved structurally with `ready()`); (2) the duplicate-detection table had to be inside the snapshot, and client session ids had to be random, because the table survives restarts and reused ids would make new requests look like old duplicates; (3) snapshot edge cases around the sentinel entry (`prevLogIndex` falling inside a follower's snapshot). (4) A real bug the tests caught: client session ids came from `math/rand` seeded with `Seed XOR now`, and with the default seed (also "now") that XOR is close to zero, so two runs could generate the same ids. Since the duplicate table is persisted, a fresh GET after a restart matched an old request and returned its cached, stale value. `TestClusterRestartKeepsMembership` found it; the fix was `crypto/rand` (`kv/session.go`).
 
 **Q27. Why Go?**
 Cheap goroutines and channels for the server side, a strong standard library (HTTP server, JSON, `container/heap`), a single static binary to deploy, and it is the language of the systems this imitates (etcd, Consul, CockroachDB).
@@ -285,7 +292,7 @@ RPC events bypass React state: they are stored in a mutable map and drawn inside
 | Throughput | ~16,500 linearizable writes/s (128 clients), ~5,300 (32 clients), ~200 (1 client) |
 | Latency | p50 6.3 ms, p99 31 ms at 128 clients (1–3 ms simulated one-way network latency) |
 | Failover | 170 ms median, 239 ms worst of 15 trials to elect; 180 ms median to first committed write |
-| Tests | 10 simulated-cluster scenarios (incl. PreVote, CheckQuorum) + chaos run of ~200 operations checked for linearizability + a 5-node cluster over real TCP; race detector in CI |
+| Tests | 16 simulated-cluster scenarios (incl. PreVote, CheckQuorum, add/remove nodes, removing the leader) + chaos and membership-under-load runs checked for linearizability + a 5-node cluster over real TCP; race detector in CI |
 | Size | ~3,700 lines of Go (heavily commented), ~1,600 lines of TypeScript, ~900 lines of tests |
 
 Re-measure on your own machine before quoting: `go run ./cmd/bench -out docs/BENCHMARK.md`.
@@ -295,7 +302,7 @@ Re-measure on your own machine before quoting: `go run ./cmd/bench -out docs/BEN
 ## 7. Resume bullets
 
 - Built a fault-tolerant distributed key-value store in **Go**, implementing the **Raft consensus algorithm from scratch** (leader election, log replication, write-ahead log persistence, snapshot-based log compaction); a 5-node cluster sustains **~16,500 linearizable writes/s at 6.3 ms median latency** (128 concurrent clients) through request batching; runs as 5 processes over TCP or in a fault-injecting simulator.
-- Achieved automatic leader **failover in ~170 ms (median of 15 trials)** with zero lost acknowledged writes, plus PreVote and CheckQuorum so partitions cannot disrupt a healthy leader; verified correctness with a chaos test suite that injects node crashes, network partitions and 5% packet loss, and validates client histories with a self-written **linearizability checker**.
+- Achieved automatic leader **failover in ~170 ms (median of 15 trials)** with zero lost acknowledged writes, plus PreVote and CheckQuorum so partitions cannot disrupt a healthy leader, and online membership changes (add/remove nodes with learner catch-up); verified correctness with a chaos test suite that injects node crashes, network partitions and 5% packet loss, and validates client histories with a self-written **linearizability checker**.
 - Designed a real-time cluster visualizer in **Next.js, TypeScript and WebSockets** that animates every RPC, election timer and per-node log at 60 fps, with interactive fault injection (kill/restart nodes, draw network partitions, latency, packet loss, 60× slow motion).
 
 Shorter one-liner for a projects section:

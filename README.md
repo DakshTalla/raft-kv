@@ -12,9 +12,9 @@ A linearizable key-value store replicated across 5 nodes with **Raft, implemente
 
 | | |
 |---|---|
-| **Raft core** | Leader election, log replication, commit index, crash-safe persistence of term / vote / log, log compaction with snapshots and `InstallSnapshot`, fast log backtracking |
+| **Raft core** | Leader election, log replication, commit index, crash-safe persistence of term / vote / log, log compaction with snapshots and `InstallSnapshot`, fast log backtracking, PreVote, CheckQuorum, cluster membership changes (add/remove nodes at runtime) |
 | **KV store** | `GET` / `PUT` / `DELETE` over HTTP/JSON. Linearizable. Followers answer `307` redirecting to the leader. Retries are exactly-once (client sessions + sequence numbers) |
-| **Chaos** | Kill / restart any node, partition the network (draw a line across the cluster), add latency, drop packets, slow time down 60×, pause |
+| **Chaos** | Kill / restart any node, add or remove nodes, partition the network (draw a line across the cluster), add latency, drop packets, slow time down 60×, pause |
 | **Visualizer** | Next.js + TypeScript + Tailwind + Framer Motion. Every RPC is animated; election timers, per-node logs, commit index and an event timeline update live over a WebSocket |
 | **Tests** | Election safety, re-election, log consistency across partitions, persistence, snapshots, and a linearizability checker run against a chaos test |
 
@@ -35,6 +35,7 @@ Things to try in the UI:
 3. **Heal network** → the stale leader steps down and its uncommitted entries are discarded.
 4. **Burst** → 20 concurrent writes get batched into a few `AppendEntries` messages.
 5. Kill a follower, **Burst** three times, restart it → it is so far behind that it receives a snapshot.
+6. **+ Add node** → the new node shows LEARNER while it catches up, then becomes a voter; the panel shows the new majority. Remove the leader with **−** → it steps down once the change commits and the rest elect a new one.
 
 ### Real multi-process cluster (TCP)
 
@@ -64,6 +65,8 @@ curl -X DELETE localhost:8080/api/kv/user:1
 
 curl -X POST localhost:8080/api/nodes/3/kill
 curl -X POST localhost:8080/api/nodes/3/restart
+curl -X POST localhost:8080/api/nodes                # add a node (returns its id)
+curl -X DELETE localhost:8080/api/nodes/2            # remove node 2 from the cluster
 curl -X POST -H "Content-Type: application/json" -d '{"groups":[[1,2],[3,4,5]]}' localhost:8080/api/network/partition
 curl -X POST localhost:8080/api/network/heal
 curl -X POST -H "Content-Type: application/json" -d '{"latencyMinMs":20,"latencyMaxMs":80,"dropRate":0.1}' localhost:8080/api/network/conditions
@@ -118,7 +121,7 @@ flowchart LR
 
 | Package | Role |
 |---|---|
-| [`raft/`](raft) | The algorithm. `raft.go` (node), `storage.go` (disk), `types.go` (messages). Knows nothing about HTTP, KV or the simulator |
+| [`raft/`](raft) | The algorithm. `raft.go` (node), `membership.go` (adding/removing nodes), `storage.go` (disk), `types.go` (messages). Knows nothing about HTTP, KV or the simulator |
 | [`sim/`](sim) | Virtual clock/scheduler and a fault-injecting in-memory network |
 | [`kv/`](kv) | The replicated state machine with exactly-once sessions |
 | [`cluster/`](cluster) | Glues N nodes together; chaos controls; the retrying client; the test suite |
@@ -176,7 +179,7 @@ Verified by the test suite (`go test ./...`), including a chaos test that crashe
 ## Limits (what this is not)
 
 - **Two modes.** `./start.ps1` runs the 5 nodes in one process over a simulated network (needed for the visualizer, slow motion and fault injection). `./start-cluster.ps1` runs 5 separate OS processes talking Raft over real TCP (`cmd/raftnode`, `transport/`), without the visualizer.
-- **No cluster membership changes.** The set of 5 nodes is fixed (no joint consensus / single-server changes).
+- **Membership changes are one server at a time** (Raft thesis §4.1), not joint consensus, so you cannot swap several nodes in one step. They work in the visualizer cluster and the Raft core; the multi-process TCP mode still has a fixed node list because its addresses are passed on the command line.
 - **PreVote and CheckQuorum are implemented**: an isolated node no longer inflates its term, and a leader that loses its majority steps down.
 - **`fsync` is off by default.** Writes survive a process crash but not necessarily a power cut. `-fsync` turns it on at a large throughput cost.
 - **Snapshots are sent in one message** and the whole state is serialized as JSON — fine for a demo, not for gigabytes.
