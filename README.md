@@ -164,14 +164,14 @@ Verified by the test suite (`go test ./...`), including a chaos test that crashe
 
 ## Limits (what this is not)
 
-- **One process, simulated network.** Nodes are objects in a single Go process talking through an in-memory network, not separate machines over TCP. The Raft core only depends on a `Send(Message)` function, so a real transport is a drop-in, but it is not built.
+- **Two modes.** `./start.ps1` runs the 5 nodes in one process over a simulated network (needed for the visualizer, slow motion and fault injection). `./start-cluster.ps1` runs 5 separate OS processes talking Raft over real TCP (`cmd/raftnode`, `transport/`), without the visualizer.
 - **No cluster membership changes.** The set of 5 nodes is fixed (no joint consensus / single-server changes).
-- **No PreVote or CheckQuorum.** A node returning from a partition has a higher term and forces one unnecessary election; an isolated leader keeps believing it leads (safely — it cannot commit) until it hears a higher term.
+- **PreVote and CheckQuorum are implemented**: an isolated node no longer inflates its term, and a leader that loses its majority steps down.
 - **`fsync` is off by default.** Writes survive a process crash but not necessarily a power cut. `-fsync` turns it on at a large throughput cost.
 - **Snapshots are sent in one message** and the whole state is serialized as JSON — fine for a demo, not for gigabytes.
 - **Reads are not optimized** (no ReadIndex, no leases, no follower reads).
 - **Client session table never expires.**
-- **Not checked with the Go race detector** on this machine (it needs a C compiler on Windows). Run `go test -race ./...` on Linux/macOS or with gcc installed.
+- **Race detector runs in GitHub Actions** (`.github/workflows/ci.yml`, Linux); it cannot run on the Windows dev machine without a C compiler.
 - **No authentication or TLS.** The chaos endpoints are open; do not expose this to the internet as anything but a demo.
 
 ## Deploying

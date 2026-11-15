@@ -5,6 +5,7 @@ package main
 import (
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,6 +26,13 @@ func main() {
 	web := flag.String("web", "web/out", "directory with the built web UI")
 	flag.Parse()
 
+	// WHY listen before anything else: if another instance is already running
+	// on this port (and therefore using this data directory), we must find out
+	// BEFORE deleting or opening its files.
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		log.Fatalf("cannot listen on %s (is raft-kv already running? stop it first): %v", *addr, err)
+	}
 	if *fresh {
 		if err := os.RemoveAll(*data); err != nil {
 			log.Fatal(err)
@@ -42,7 +50,7 @@ func main() {
 	go func() {
 		log.Printf("raft-kv: %d nodes, %gx slow motion, data in %q", *nodes, *scale, *data)
 		log.Printf("raft-kv: open http://localhost%s", *addr)
-		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != http.ErrServerClosed {
 			log.Fatal(err)
 		}
 	}()

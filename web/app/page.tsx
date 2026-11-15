@@ -12,6 +12,7 @@ import { chaos } from "@/lib/api";
 import { useCluster } from "@/lib/useCluster";
 
 const LEGEND = [
+  { color: "#fde68a", label: "PreVote", hollow: true },
   { color: "#fbbf24", label: "RequestVote" },
   { color: "#34d399", label: "AppendEntries (number = entries)" },
   { color: "#34d399", label: "heartbeat", small: true },

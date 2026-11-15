@@ -257,7 +257,7 @@ function NodeView({
         N{node.id}
       </text>
       <text textAnchor="middle" y={role === "leader" ? 21 : 18} fontSize={9} fontWeight={600} letterSpacing="0.12em" fill={color}>
-        {role === "dead" ? "DOWN" : role.toUpperCase()}
+        {role === "dead" ? "DOWN" : node.preVoting ? "PRE-VOTE" : role.toUpperCase()}
       </text>
 
       {/* Term badge */}
@@ -290,6 +290,7 @@ interface Style {
   color: string;
   r: number;
   hollow?: boolean;
+  ring?: boolean; // outlined in its own colour (pre-vote: only a question, not a vote)
   square?: boolean;
   label?: string;
 }
@@ -304,6 +305,10 @@ function styleOf(f: Flight): Style {
       return f.heartbeat ? { color: "#34d399", r: 3.2 } : { color: "#34d399", r: 7, label: String(f.entries) };
     case "AppendEntriesResp":
       return f.success ? { color: "#7dd3fc", r: 3.2 } : { color: "#f87171", r: 4.5, hollow: true };
+    case "PreVote":
+      return { color: "#fde68a", r: 4.5, ring: true };
+    case "PreVoteResp":
+      return f.success ? { color: "#fde68a", r: 3.2 } : { color: "#f87171", r: 4.5, hollow: true };
     case "InstallSnapshot":
       return { color: "#e879f9", r: 7, square: true };
     default:
@@ -412,7 +417,7 @@ function LiveLayer({
         {s.square ? (
           <rect x={-s.r} y={-s.r} width={s.r * 2} height={s.r * 2} rx={2} fill={s.color} />
         ) : (
-          <circle r={s.r} fill={s.hollow ? "#07080c" : s.color} stroke={s.color} strokeWidth={s.hollow ? 1.6 : 0} />
+          <circle r={s.r} fill={s.hollow || s.ring ? "#07080c" : s.color} stroke={s.color} strokeWidth={s.hollow || s.ring ? 1.6 : 0} />
         )}
         {s.label && (
           <text textAnchor="middle" y={3} fontSize={8} fontWeight={700} fill="#052e1f">

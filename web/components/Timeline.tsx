@@ -9,6 +9,7 @@ type Category = "election" | "log" | "chaos";
 const CATEGORY: Record<string, Category> = {
   role: "election",
   vote: "election",
+  prevote: "election",
   append: "log",
   commit: "log",
   truncate: "log",
@@ -31,8 +32,10 @@ function describe(e: ClusterEvent): { title: string; sub?: string; color?: strin
   switch (e.kind) {
     case "role":
       if (e.role === "leader") return { title: `${n} became leader`, sub: `won a majority in term ${e.term}`, color: "#34d399" };
-      if (e.role === "candidate") return { title: `${n} started an election`, sub: `election timeout fired → term ${e.term}` };
-      return { title: `${n} stepped down to follower`, sub: `saw term ${e.term}`, color: "#60a5fa" };
+      if (e.role === "candidate") return { title: `${n} started an election`, sub: `a majority pre-voted yes → term ${e.term}` };
+      return { title: `${n} stepped down to follower`, sub: e.detail || `saw term ${e.term}`, color: "#60a5fa" };
+    case "prevote":
+      return { title: `${n} lost its leader, asks for pre-votes`, sub: `stays in term ${e.term} unless a majority agrees` };
     case "vote":
       return { title: `${n} voted for N${e.peer}`, sub: `term ${e.term}` };
     case "append":

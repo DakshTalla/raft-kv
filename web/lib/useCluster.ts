@@ -36,6 +36,7 @@ export function useCluster(): ClusterFeed {
   const clock = useRef({ now: 0, at: 0, scale: 1, paused: false });
   const msgCount = useRef(0);
   const leader = useRef(0);
+  const lastKind = useRef<Map<number, string>>(new Map()); // last timeline event per node
 
   const virtualNow = useCallback(() => {
     const c = clock.current;
@@ -65,6 +66,12 @@ export function useCluster(): ClusterFeed {
           // Every node reports its own commit index; only the leader's is
           // news — the followers' would repeat it four more times.
           if (e.kind === "commit" && e.node !== leader.current) continue;
+          // An isolated node retries its pre-vote on every election timeout;
+          // show the first attempt only, until something else happens to it.
+          if (e.node) {
+            if (e.kind === "prevote" && lastKind.current.get(e.node) === "prevote") continue;
+            lastKind.current.set(e.node, e.kind);
+          }
           fresh.push(e);
           continue;
         }

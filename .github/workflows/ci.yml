@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    name: Go tests (race detector)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go vet ./...
+      # The race detector needs cgo; it is available here but not on the
+      # Windows dev machine, so CI is where data races get caught.
+      - run: go test -race -timeout 10m ./...
+
+  web:
+    name: Web build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --no-fund --no-audit
+      - run: npm run build

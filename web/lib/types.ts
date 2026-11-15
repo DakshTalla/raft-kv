@@ -27,6 +27,7 @@ export interface NodeState {
   electionTimeout: number;
   heartbeatElapsed: number;
   heartbeatTicks: number;
+  preVoting?: boolean;
   votes?: Record<string, boolean>;
   nextIndex?: Record<string, number>;
   matchIndex?: Record<string, number>;
@@ -52,7 +53,9 @@ export type MsgType =
   | "AppendEntries"
   | "AppendEntriesResp"
   | "InstallSnapshot"
-  | "InstallSnapshotResp";
+  | "InstallSnapshotResp"
+  | "PreVote"
+  | "PreVoteResp";
 
 export interface Msg {
   id: number;

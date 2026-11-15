@@ -11,16 +11,16 @@
 
 | Concurrent clients | Throughput (ops/s) | p50 latency | p95 latency | p99 latency |
 |---:|---:|---:|---:|---:|
-| 1 | 207 | 4.8 ms | 5.9 ms | 6.4 ms |
-| 8 | 1329 | 5.8 ms | 6.9 ms | 12.5 ms |
-| 32 | 5259 | 5.9 ms | 6.8 ms | 16.2 ms |
-| 128 | 14838 | 6.5 ms | 24.8 ms | 38.2 ms |
+| 1 | 206 | 4.9 ms | 5.9 ms | 6.4 ms |
+| 8 | 1369 | 5.8 ms | 6.6 ms | 8.2 ms |
+| 32 | 5262 | 5.9 ms | 6.8 ms | 15.2 ms |
+| 128 | 16539 | 6.3 ms | 21.2 ms | 30.9 ms |
 
 ## Leader failover (15 trials: kill the leader, measure recovery)
 
 | Metric | median | mean | max |
 |---|---:|---:|---:|
-| Leader crash → new leader elected | 170.3 ms | 178.7 ms | 261.4 ms |
-| Leader crash → first successful client write | 178.3 ms | 187.8 ms | 270.8 ms |
+| Leader crash → new leader elected | 169.8 ms | 175.5 ms | 239.2 ms |
+| Leader crash → first successful client write | 179.9 ms | 184.8 ms | 249.2 ms |
 
 Failover is dominated by the election timeout: followers wait 150–300 ms without a heartbeat before starting an election.
