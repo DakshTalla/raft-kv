@@ -124,7 +124,7 @@ A file-by-file walkthrough is in [docs/STUDY_GUIDE.md](docs/STUDY_GUIDE.md).
 |---|---|
 | ![Healthy cluster](docs/screenshots/cluster.png) | ![Partitioned cluster](docs/screenshots/partition.png) |
 
-> **Demo GIF:** record one with [ScreenToGif](https://www.screentogif.com/) (free): kill the leader → wait for the election → *Split 2 | 3* → *Heal*. Save it as `docs/screenshots/demo.gif` and add `![demo](docs/screenshots/demo.gif)` at the top of this file.
+To see it move, open the [live demo](https://raft-kv.onrender.com): kill the leader → wait for the election → *Split 2 | 3* → *Heal network*.
 
 ## Measured performance
 
